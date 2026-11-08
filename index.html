@@ -192,7 +192,7 @@ a{color:inherit} button{font:inherit;color:inherit;cursor:pointer}
     <button class="ibtn" id="goMap">Voir le plan</button>
     <button class="ibtn alt" id="goRide">Monter à PNL</button>
   </div>
-  <div class="note">♪ Mets le son : chaque station joue un extrait de ce que Carl écoute. Extraits de 30 s fournis par Apple Music, morceaux complets sur Spotify.</div>
+  <div class="note">♪ Mets le son : chaque station joue un extrait de ce que Carl écoute. Extraits de 30 s fournis par Apple Music et Deezer, morceaux complets sur Spotify.</div>
 </section>
 <div class="flash" id="flash"></div>
 
@@ -413,7 +413,7 @@ document.addEventListener("visibilitychange",()=>{ if(document.hidden){ if(AU.ct
 /* =========================================================
    MUSIC — real 30 s previews (Apple iTunes Search API)
    ========================================================= */
-const MUS={els:[],cur:-1,key:null,label:null,cors:true,an:null,data:null,cache:{},playing:false,station:null,queue:[],qi:0,muffle:1,target:1,ready:false};
+const MUS={els:[],cur:-1,key:null,label:null,cors:false,itunesDown:false,an:null,data:null,cache:{},playing:false,station:null,queue:[],qi:0,muffle:1,target:1,ready:false};
 let jsonpN=0;
 function jsonp(url){ return new Promise((res,rej)=>{ const cb="__it"+(jsonpN++)+"_"+Date.now(); const sc=document.createElement("script"); let done=false;
   const end=()=>{ done=true; clearTimeout(to); try{ delete window[cb]; }catch(e){ window[cb]=undefined; } sc.remove(); };
@@ -429,17 +429,19 @@ function pickResult(rs,art,title){
     if(sc>bs){ bs=sc; best=r; } }
   return best; }
 async function lookup(cacheKey,term,art,title){
-  if(cacheKey in MUS.cache) return MUS.cache[cacheKey];
-  let hit=null;
-  for(const c of ["BE","FR","US"]){
-    const d=await jsonp("https://itunes.apple.com/search?term="+encodeURIComponent(term)+"&entity=song&limit=20&country="+c).catch(()=>null);
-    hit=d&&pickResult(d.results,art,title); if(hit) break; }
-  const v=hit?{url:hit.previewUrl,title:hit.trackName,artist:hit.artistName}:null;
+  const hit0=MUS.cache[cacheKey];
+  if(hit0!==undefined && (!hit0 || hit0.cors || Date.now()-hit0.ts<600000)) return hit0;
+  let v=null;
+  if(!MUS.itunesDown){ // Apple first: its previews allow the in-tunnel filter and real-sound visuals
+    const d=await jsonp("https://itunes.apple.com/search?term="+encodeURIComponent(term)+"&entity=song&limit=25&country=BE").catch(()=>{ MUS.itunesDown=true; return null; });
+    const r=d&&pickResult(d.results,art,title); if(r) v={url:r.previewUrl,title:r.trackName,artist:r.artistName,cors:true,ts:Date.now()}; }
+  if(!v){ // Deezer fallback: wide French rap catalogue, plain playback
+    const d=await jsonp("https://api.deezer.com/search?q="+encodeURIComponent(term)+"&limit=25&output=jsonp").catch(()=>null);
+    const rs=d&&d.data?d.data.map(x=>({previewUrl:x.preview,artistName:x.artist&&x.artist.name,trackName:x.title})):[];
+    const r=pickResult(rs,art,title); if(r) v={url:r.previewUrl,title:r.trackName,artist:r.artistName,cors:false,ts:Date.now()}; }
   MUS.cache[cacheKey]=v; return v; }
 function previewFor(key){ const t=TR[key], art=t[1].split(",")[0].trim(); return lookup("t:"+key, art+" "+t[0].split("/")[0], art, t[0]); }
 function previewForArtist(id){ const s=ST[id]; return lookup("a:"+id, s.name, s.name.split(" & ")[0], null); }
-// warm the cache for the stations around the start
-function prefetch(keys){ keys.forEach((k,i)=>setTimeout(()=>previewFor(k),i*250)); }
 
 function silentWav(){ const n=2205,b=new ArrayBuffer(44+n*2),v=new DataView(b); const w=(o,s)=>{for(let i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i));};
   w(0,"RIFF"); v.setUint32(4,36+n*2,true); w(8,"WAVE"); w(12,"fmt "); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,22050,true); v.setUint32(28,44100,true); v.setUint16(32,2,true); v.setUint16(34,16,true); w(36,"data"); v.setUint32(40,n*2,true);
@@ -453,7 +455,7 @@ function makeEls(withCors){
       e.gain=AU.ctx.createGain(); e.gain.gain.value=0; n.connect(e.filt).connect(e.gain).connect(MUS.an); }catch(x){ e.filt=null; e.gain=null; } }
     a.addEventListener("ended",()=>{ if(MUS.els[MUS.cur]===e) nextInQueue(); });
     a.addEventListener("error",()=>{ if(withCors && e.src && MUS.cors && MUS.els[MUS.cur]===e){ // preview host refused CORS: switch to plain players
-      MUS.cors=false; const k=MUS.key,l=MUS.label; MUS.els.forEach(x=>{ try{ x.a.pause(); }catch(y){} }); MUS.els=MUS.plain; MUS.cur=-1; if(k) startEl(k,l); } });
+      const k=MUS.key,l=MUS.label; if(k) startEl(k,l,false); } });
     set.push(e); }
   return set;
 }
@@ -468,8 +470,11 @@ function musInit(){
 function setVol(e,v,ramp){ e.vol=v; if(e.gain){ e.gain.gain.setTargetAtTime(v,AU.ctx.currentTime,ramp||.25); } else { try{ e.a.volume=Math.max(0,Math.min(1,v)); }catch(x){} } }
 function setMuffle(m,ramp){ MUS.muffle=m; const e=MUS.els[MUS.cur]; if(e&&e.filt){ const f=m>=1?18000:350+m*2600; e.filt.frequency.setTargetAtTime(f,AU.ctx.currentTime,ramp||.3); }
   $("np").classList.toggle("muffled",m<1); }
-function startEl(url,label){
-  if(!MUS.els.length) return;
+function startEl(url,label,cors){
+  if(!MUS.plain) return;
+  const set=(cors&&MUS.routed)?MUS.routed:MUS.plain;
+  if(set!==MUS.els){ const o=MUS.els[MUS.cur]; if(o){ setVol(o,0,.3); const oa=o.a; setTimeout(()=>{ try{ oa.pause(); }catch(x){} },900); } MUS.els=set; MUS.cur=-1; }
+  MUS.cors=set===MUS.routed;
   const nextI=MUS.cur<0?0:1-MUS.cur, old=MUS.els[MUS.cur], e=MUS.els[nextI];
   if(old){ setVol(old,0,.35); const oa=old.a; setTimeout(()=>{ if(MUS.els[MUS.cur]!==old){ try{ oa.pause(); }catch(x){} } },1600); }
   MUS.cur=nextI; MUS.key=url; MUS.label=label; e.src=url; e.a.src=url; e.a.currentTime=0;
@@ -482,13 +487,13 @@ async function playKey(key,opts){
   opts=opts||{}; const tok=(MUS.tok=(MUS.tok||0)+1);
   const p=await previewFor(key); if(tok!==MUS.tok) return null;
   if(!p){ return false; }
-  MUS.nowKey=key; startEl(p.url,{title:TR[key][0],artist:TR[key][1].split(",")[0],key}); return true;
+  MUS.nowKey=key; startEl(p.url,{title:TR[key][0],artist:TR[key][1].split(",")[0],key},p.cors); return true;
 }
 async function playStation(id){
   const s=ST[id]; MUS.station=id; MUS.queue=s.tracks.slice(); MUS.qi=0;
   if(MUS.queue.length){ for(let i=0;i<MUS.queue.length;i++){ MUS.qi=i; const r=await playKey(MUS.queue[i]); if(r||r===null||MUS.station!==id) return; } }
   const tok=(MUS.tok=(MUS.tok||0)+1); const p=await previewForArtist(id); if(tok!==MUS.tok||MUS.station!==id) return;
-  if(p){ MUS.nowKey=null; startEl(p.url,{title:p.title,artist:s.name,note:"pas dans ses tops",artistPick:true}); }
+  if(p){ MUS.nowKey=null; startEl(p.url,{title:p.title,artist:s.name,note:"pas dans ses tops",artistPick:true},p.cors); }
   else { musStop(); }
 }
 function nextInQueue(){
@@ -703,7 +708,7 @@ function renderBoard(){
       <button class="nbtn mapb" id="bMap">Plan</button>
       <button class="nbtn r" id="bNext" ${next?"":"disabled"}><small>${next?"Direction":"Terminus"} ▶</small><span>${next?esc(ST[next].name):"—"}</span></button>
     </div>
-    <p class="fine">♪ ${s.tracks.length?"Extraits de 30 s de ses sons":"Aucun son de "+esc(s.name)+" dans ses tops : l'extrait est un titre de l'artiste"}, fournis par Apple Music. Morceaux complets sur Spotify · <a href="${PLAYLIST}" target="_blank" rel="noopener">la bande-son en playlist</a></p>`;
+    <p class="fine">♪ ${s.tracks.length?"Extraits de 30 s de ses sons":"Aucun son de "+esc(s.name)+" dans ses tops : l'extrait est un titre de l'artiste"}, fournis par Apple Music ou Deezer. Morceaux complets sur Spotify · <a href="${PLAYLIST}" target="_blank" rel="noopener">la bande-son en playlist</a></p>`;
   $("boardIn").querySelectorAll("[data-line]").forEach(b=>b.onclick=()=>changeLine(b.dataset.line));
   $("boardIn").querySelectorAll(".trow .play").forEach(b=>b.onclick=()=>{ musInit(); const k=b.closest(".trow").dataset.key; if(MUS.playing&&MUS.nowKey===k){ musToggle(); return; } MUS.qi=Math.max(0,MUS.queue.indexOf(k)); setMuffle(1,.1); musTarget(1); playKey(k); });
   renderPlayState();
@@ -811,7 +816,6 @@ function frame(now){
 }
 if(document.fonts&&document.fonts.load){ Promise.all([document.fonts.load('800 40px "Barlow Condensed"'),document.fonts.load('20px "VT323"')]).catch(()=>{}); }
 requestAnimationFrame(frame);
-setTimeout(()=>prefetch(["monde","bambina","dale","riri","fiebre","balek"]),1500);
 })();
 </script>
 
